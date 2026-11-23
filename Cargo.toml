@@ -1,0 +1,14 @@
+
+[workspace]
+members = [
+    "apps/server",
+    "apps/client",
+    "crates/domain",
+    "crates/common",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"

@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "skills": {
+    "rust-axum-sqlx": {
+      "source": "antoinejaussoin/retro-board",
+      "commit": "5080e2d68bcb2839f4a31c83b85c535a0827a7bd",
+      "sourceType": "github",
+      "skillPath": ".cursor/skills/rust-axum-sqlx/SKILL.md",
+      "computedHash": "cd189f0c19ed01b8b01e8f3a03ab8449422faa6223d0aba412ecb5dda5a9565d"
+    },
+    "rust-development": {
+      "source": "GAIn-Tech/opencode-setup",
+      "commit": "2d5e4893bfd6464b8f03e6b341e49695a2a8d7e2",
+      "sourceType": "github",
+      "skillPath": "opencode-config/skills/rust-development/SKILL.md",
+      "computedHash": "a3dc865a840fdd8761ffe868f546c3eaea9ee9feca7d1d2861460ff0eeeaaacc"
+    }
+  }
+}
