@@ -1,28 +1,9 @@
-use axum::{Router, extract::State, http::StatusCode, routing::get};
-use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{migrate::Migrator, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 
 // Paths in `migrate!` are relative to this crate's Cargo.toml
 // (apps/server), so this resolves to the workspace-level migrations dir.
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
-
-async fn health() -> &'static str {
-    "TeamSpace API is running!"
-}
-
-async fn health_db(State(pool): State<PgPool>) -> Result<&'static str, (StatusCode, &'static str)> {
-    sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database connection failed",
-            )
-        })?;
-
-    Ok("TeamSpace database connected!")
-}
 
 #[tokio::main]
 async fn main() {
@@ -45,10 +26,7 @@ async fn main() {
 
     println!("Database migrations applied!");
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/health/db", get(health_db))
-        .with_state(pool);
+    let app = server::app(pool);
 
     let listener = TcpListener::bind("127.0.0.1:3000")
         .await

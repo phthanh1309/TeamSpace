@@ -5,112 +5,14 @@
 //! works in its own temporary schema and never touches the `public` schema.
 //! When `DATABASE_URL` is not set the tests report a skip instead of failing.
 
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod support;
 
 use server::users::{create_user, find_user_id_by_email};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, PgPool};
-
-const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-
-fn database_url() -> Option<String> {
-    dotenvy::dotenv().ok();
-    std::env::var("DATABASE_URL").ok()
-}
-
-/// A throwaway schema so tests never modify application data.
-struct TestSchema {
-    name: String,
-    admin: PgConnection,
-    pool: PgPool,
-}
-
-impl TestSchema {
-    async fn new(url: &str) -> Self {
-        let name = format!(
-            "teamspace_email_test_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is before the UNIX epoch")
-                .as_nanos()
-        );
-
-        let mut admin = PgConnection::connect(url)
-            .await
-            .expect("connect to PostgreSQL for test schema setup");
-
-        // The schema name is generated above from a process id and a timestamp,
-        // so it contains no untrusted input.
-        sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA \"{name}\"")))
-            .execute(&mut admin)
-            .await
-            .expect("create the temporary test schema");
-
-        let search_path = format!("SET search_path TO \"{name}\"");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .after_connect(move |connection, _metadata| {
-                let search_path = search_path.clone();
-                Box::pin(async move {
-                    connection
-                        .execute(sqlx::raw_sql(AssertSqlSafe(search_path)))
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .expect("connect to the temporary test schema");
-
-        Self { name, admin, pool }
-    }
-
-    async fn cleanup(mut self) {
-        self.pool.close().await;
-        let _ = sqlx::raw_sql(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            self.name
-        )))
-        .execute(&mut self.admin)
-        .await;
-    }
-}
-
-fn up_migration_files() -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(MIGRATIONS_DIR)
-        .unwrap_or_else(|error| panic!("read migrations directory {MIGRATIONS_DIR}: {error}"))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.to_string_lossy().ends_with(".up.sql"))
-        .collect();
-    files.sort();
-    files
-}
-
-fn down_migration_file(up: &Path) -> PathBuf {
-    let file_name = up
-        .file_name()
-        .expect("migration file has a name")
-        .to_string_lossy();
-    up.with_file_name(file_name.replace(".up.sql", ".down.sql"))
-}
-
-async fn apply_sql_file(pool: &PgPool, path: &Path) {
-    let sql = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    sqlx::raw_sql(AssertSqlSafe(sql))
-        .execute(pool)
-        .await
-        .unwrap_or_else(|error| panic!("apply {}: {error}", path.display()));
-}
-
-async fn apply_all_up_migrations(pool: &PgPool) {
-    for path in up_migration_files() {
-        apply_sql_file(pool, &path).await;
-    }
-}
+use sqlx::PgPool;
+use support::{
+    TestSchema, apply_all_up_migrations, apply_sql_file, database_url, down_migration_file,
+    up_migration_files,
+};
 
 fn assert_unique_violation(error: sqlx::Error) {
     let database_error = error
