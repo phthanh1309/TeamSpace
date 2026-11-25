@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use axum::{
     Json,
     extract::{FromRequestParts, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -22,6 +22,9 @@ use domain::normalize_email;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::errors::{
+    error_response, internal_error, is_unique_violation, log_database_error, unauthorized,
+};
 use crate::password::{MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH};
 use crate::{password, sessions, users};
 
@@ -165,25 +168,6 @@ impl RegisterRequest {
     }
 }
 
-/// Consistent error body for every client-visible failure.
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: &'static str,
-    message: &'static str,
-}
-
-fn error_response(status: StatusCode, error: &'static str, message: &'static str) -> Response {
-    (status, Json(ErrorResponse { error, message })).into_response()
-}
-
-fn internal_error() -> Response {
-    error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal_error",
-        "an internal server error occurred",
-    )
-}
-
 /// The single error returned for both an unknown email and a wrong password.
 ///
 /// Keeping one message and status avoids disclosing whether an account exists.
@@ -193,36 +177,6 @@ fn invalid_credentials() -> Response {
         "invalid_credentials",
         "invalid email or password",
     )
-}
-
-/// Rejection for a missing, malformed, expired or revoked bearer token.
-fn unauthorized() -> Response {
-    let mut response = error_response(
-        StatusCode::UNAUTHORIZED,
-        "unauthorized",
-        "a valid bearer token is required",
-    );
-    response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-    response
-}
-
-/// Returns whether the error is a PostgreSQL unique violation (`23505`).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|database_error| database_error.code())
-        .is_some_and(|code| code.as_ref() == "23505")
-}
-
-/// Logs only the SQLSTATE so no SQL text, parameters or credentials leak.
-fn log_database_error(endpoint: &str, error: &sqlx::Error) {
-    let code = error
-        .as_database_error()
-        .and_then(|database_error| database_error.code())
-        .unwrap_or_else(|| "unknown".into());
-    eprintln!("{endpoint} failed: database error (SQLSTATE {code})");
 }
 
 /// Handles `POST /auth/register`.

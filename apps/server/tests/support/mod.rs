@@ -1,8 +1,12 @@
-//! Shared PostgreSQL harness for integration tests.
+//! Shared PostgreSQL and HTTP harness for integration tests.
 //!
 //! Every test runs in its own throwaway schema, applies the real migrations to
 //! it and drops it afterwards, so the `public` schema is never touched. When
 //! `DATABASE_URL` is not set the individual tests report a skip.
+//!
+//! The HTTP helpers (`send`, `register_and_login`, ...) drive the real router
+//! in-process, so tests exercise routing, extractors and handlers exactly like
+//! a network request would.
 
 #![allow(dead_code)]
 
@@ -10,10 +14,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{
+    HeaderMap, Request, StatusCode,
+    header::{AUTHORIZATION, CONTENT_TYPE},
+};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, PgPool};
+use tower::ServiceExt;
 
 const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+
+/// Password used by the HTTP helpers when registering and logging in users.
+pub const TEST_PASSWORD: &str = "correct horse battery staple";
 
 /// Disambiguates schemas created by tests running in parallel in one process.
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -81,6 +96,156 @@ impl TestSchema {
         .execute(&mut self.admin)
         .await;
     }
+}
+
+/// Creates an isolated schema with every migration applied and the app on top.
+///
+/// Returns `None` when `DATABASE_URL` is unset so callers can report a skip.
+pub async fn setup() -> Option<(TestSchema, Router)> {
+    let url = database_url()?;
+    let schema = TestSchema::new(&url).await;
+    apply_all_up_migrations(&schema.pool).await;
+    let app = server::app(schema.pool.clone());
+    Some((schema, app))
+}
+
+/// A decoded JSON response from the application router.
+#[derive(Debug)]
+pub struct ApiResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: String,
+    pub json: Value,
+}
+
+/// Sends a JSON request through the router without binding a TCP socket.
+pub async fn send(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    bearer: Option<&str>,
+) -> ApiResponse {
+    let raw_body = body.map(|value| value.to_string());
+    send_raw(app, method, uri, raw_body.as_deref(), bearer).await
+}
+
+/// Sends a request with an already encoded body, for malformed-JSON tests.
+pub async fn send_raw(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+    bearer: Option<&str>,
+) -> ApiResponse {
+    let mut builder = Request::builder().method(method).uri(uri);
+
+    if body.is_some() {
+        builder = builder.header(CONTENT_TYPE, "application/json");
+    }
+    if let Some(token) = bearer {
+        builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(body.unwrap_or_default().to_owned()))
+                .expect("build the test request"),
+        )
+        .await
+        .expect("send the test request");
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read the test response body");
+    let text = String::from_utf8(bytes.to_vec()).expect("response body is UTF-8");
+    let json = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).expect("test response is JSON")
+    };
+
+    ApiResponse {
+        status,
+        headers,
+        body: text,
+        json,
+    }
+}
+
+/// Registers a user through `POST /auth/register` and returns its id.
+pub async fn register(app: &Router, email: &str, display_name: &str) -> i64 {
+    let response = send(
+        app,
+        "POST",
+        "/auth/register",
+        Some(json!({
+            "email": email,
+            "password": TEST_PASSWORD,
+            "display_name": display_name,
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.body);
+    response.json["id"].as_i64().expect("numeric user id")
+}
+
+/// Logs a registered user in and returns the bearer token.
+pub async fn login_token(app: &Router, email: &str) -> String {
+    let response = send(
+        app,
+        "POST",
+        "/auth/login",
+        Some(json!({ "email": email, "password": TEST_PASSWORD })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    response.json["token"]
+        .as_str()
+        .expect("login token")
+        .to_owned()
+}
+
+/// Registers a user, logs in and returns `(user_id, bearer_token)`.
+pub async fn register_and_login(app: &Router, email: &str, display_name: &str) -> (i64, String) {
+    let user_id = register(app, email, display_name).await;
+    let token = login_token(app, email).await;
+    (user_id, token)
+}
+
+/// Creates a project through the API and returns its id.
+pub async fn create_project(app: &Router, token: &str, name: &str) -> i64 {
+    let response = send(
+        app,
+        "POST",
+        "/projects",
+        Some(json!({ "name": name })),
+        Some(token),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.body);
+    response.json["id"].as_i64().expect("numeric project id")
+}
+
+/// Asserts that a database error carries the expected SQLSTATE code.
+pub fn assert_sqlstate(error: sqlx::Error, expected: &str) {
+    let database_error = error
+        .as_database_error()
+        .unwrap_or_else(|| panic!("expected a database error, got: {error}"));
+    assert_eq!(
+        database_error.code().as_deref(),
+        Some(expected),
+        "unexpected SQLSTATE: {database_error}"
+    );
 }
 
 pub fn up_migration_files() -> Vec<PathBuf> {

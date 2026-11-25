@@ -7,7 +7,9 @@ use axum::{Router, extract::State, http::StatusCode, routing::get, routing::post
 use sqlx::PgPool;
 
 pub mod auth;
+pub mod errors;
 pub mod password;
+pub mod projects;
 pub mod sessions;
 pub mod users;
 
@@ -20,6 +22,16 @@ pub fn app(pool: PgPool) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route(
+            "/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/projects/{project_id}",
+            get(projects::get_project)
+                .patch(projects::update_project)
+                .delete(projects::delete_project),
+        )
         .with_state(pool)
 }
 
