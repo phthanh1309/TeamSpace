@@ -1,3 +1,5 @@
 .env
 /target
 .git.scaffold-backup/
+server_postgre.bat
+AGENTS.md
