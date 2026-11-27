@@ -50,6 +50,7 @@ pub fn DashboardPage() -> Element {
         .user()
         .map(|user| format!("Hi, {}.", user.display_name))
         .unwrap_or_else(|| "Hi.".to_owned());
+    let viewer_id = state.user().map(|user| user.id);
 
     let content = match projects() {
         None => rsx! {
@@ -70,6 +71,7 @@ pub fn DashboardPage() -> Element {
                 for project in list {
                     ProjectCard {
                         key: "{project.id}",
+                        is_owner: viewer_id == Some(project.owner_id),
                         project: project.clone(),
                         on_open: move |id| state.navigate(Route::Project { id }),
                     }
@@ -117,7 +119,7 @@ pub fn DashboardPage() -> Element {
 }
 
 #[component]
-fn ProjectCard(project: Project, on_open: EventHandler<i64>) -> Element {
+fn ProjectCard(project: Project, is_owner: bool, on_open: EventHandler<i64>) -> Element {
     let initial = project
         .name
         .chars()
@@ -129,13 +131,21 @@ fn ProjectCard(project: Project, on_open: EventHandler<i64>) -> Element {
         .clone()
         .unwrap_or_else(|| "No description yet.".to_owned());
     let created = format::short_date(&project.created_at);
+    let role_class = if is_owner {
+        "project-role project-role-owner"
+    } else {
+        "project-role project-role-member"
+    };
     let id = project.id;
 
     rsx! {
         article { class: "project-card",
             div { class: "project-card-top",
                 span { class: "project-initial", "{initial}" }
-                span { class: "project-created", "Created {created}" }
+                div { class: "project-card-meta",
+                    span { class: "{role_class}", if is_owner { "Owner" } else { "Member" } }
+                    span { class: "project-created", "Created {created}" }
+                }
             }
             h2 { class: "project-name", "{project.name}" }
             p { class: "project-description", "{description}" }

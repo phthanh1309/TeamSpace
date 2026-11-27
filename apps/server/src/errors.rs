@@ -58,6 +58,19 @@ pub fn not_found(message: &'static str) -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", message)
 }
 
+/// The response for an action the caller may not perform.
+///
+/// Used only for resources the caller can already see, such as a project the
+/// user belongs to but does not own, so it reveals nothing new.
+pub fn forbidden(message: &'static str) -> Response {
+    error_response(StatusCode::FORBIDDEN, "forbidden", message)
+}
+
+/// The response for a request that conflicts with the current state.
+pub fn conflict(message: &'static str) -> Response {
+    error_response(StatusCode::CONFLICT, "conflict", message)
+}
+
 /// Returns whether the error is a PostgreSQL unique violation (`23505`).
 pub fn is_unique_violation(error: &sqlx::Error) -> bool {
     error

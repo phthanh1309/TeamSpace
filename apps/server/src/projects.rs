@@ -1,14 +1,17 @@
 //! Project CRUD endpoints.
 //!
-//! In this milestone a project belongs to exactly one user. Every handler is
-//! behind [`AuthUser`] and every query filters on `owner_id`, so a user can
-//! never reach another user's project by guessing its id. A project that exists
-//! but belongs to somebody else is reported as `404`, exactly like a missing
-//! one, so identifiers do not leak existence.
+//! Every handler is behind [`AuthUser`]. Ownership is stored only in
+//! `projects.owner_id`; additional collaborators live in `project_members` with
+//! the `member` role, so the owner role is always derived from the column and
+//! can never disagree with a duplicate row.
 //!
-//! Ownership is stored only in `projects.owner_id`. The membership milestone
-//! must derive the owner role from this column instead of duplicating it in
-//! `project_members`, so the two can never disagree.
+//! Access rules:
+//!
+//! - the owner and any member may read a project and its members;
+//! - only the owner may update or delete it;
+//! - a user with no access gets `404`, exactly like a missing project, so
+//!   identifiers do not leak existence. A member attempting an owner-only
+//!   action gets `403`, because they already know the project exists.
 
 use axum::{
     Json,
@@ -24,7 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::{FromRow, PgPool};
 
 use crate::auth::AuthUser;
-use crate::errors::{internal_error, invalid_request, log_database_error, not_found};
+use crate::errors::{forbidden, internal_error, invalid_request, log_database_error, not_found};
 
 /// Largest project name accepted, matching `projects.name VARCHAR(120)`.
 pub const MAX_PROJECT_NAME_LENGTH: usize = 120;
@@ -191,7 +194,7 @@ fn project_not_found() -> Response {
 ///
 /// No project can have such an id, so this matches a missing row and keeps the
 /// response shape consistent instead of exposing a path-parsing error.
-fn parse_project_id(path: Result<Path<i64>, PathRejection>) -> Result<i64, Response> {
+pub(crate) fn parse_project_id(path: Result<Path<i64>, PathRejection>) -> Result<i64, Response> {
     match path {
         Ok(Path(project_id)) if project_id > 0 => Ok(project_id),
         _ => Err(project_not_found()),
@@ -217,35 +220,52 @@ async fn insert_project(
     .await
 }
 
-async fn list_projects_owned_by(pool: &PgPool, owner_id: i64) -> Result<Vec<Project>, sqlx::Error> {
+async fn list_projects_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<Project>, sqlx::Error> {
+    // `EXISTS` keeps one row per project even though two paths can grant
+    // access, so a project can never appear twice in the list.
     sqlx::query_as::<_, Project>(
         r#"
-        SELECT id, name, description, owner_id, created_at, updated_at
-        FROM projects
-        WHERE owner_id = $1
-        ORDER BY created_at DESC, id DESC
+        SELECT p.id, p.name, p.description, p.owner_id, p.created_at, p.updated_at
+        FROM projects p
+        WHERE p.owner_id = $1
+           OR EXISTS (
+                SELECT 1
+                FROM project_members m
+                WHERE m.project_id = p.id
+                  AND m.user_id = $1
+           )
+        ORDER BY p.created_at DESC, p.id DESC
         "#,
     )
-    .bind(owner_id)
+    .bind(user_id)
     .fetch_all(pool)
     .await
 }
 
-async fn find_owned_project(
+/// Loads a project the caller may read: as its owner or as a member.
+pub(crate) async fn find_accessible_project(
     pool: &PgPool,
     project_id: i64,
-    owner_id: i64,
+    user_id: i64,
 ) -> Result<Option<Project>, sqlx::Error> {
     sqlx::query_as::<_, Project>(
         r#"
-        SELECT id, name, description, owner_id, created_at, updated_at
-        FROM projects
-        WHERE id = $1
-          AND owner_id = $2
+        SELECT p.id, p.name, p.description, p.owner_id, p.created_at, p.updated_at
+        FROM projects p
+        WHERE p.id = $1
+          AND (
+                p.owner_id = $2
+                OR EXISTS (
+                    SELECT 1
+                    FROM project_members m
+                    WHERE m.project_id = p.id
+                      AND m.user_id = $2
+                )
+          )
         "#,
     )
     .bind(project_id)
-    .bind(owner_id)
+    .bind(user_id)
     .fetch_optional(pool)
     .await
 }
@@ -332,9 +352,9 @@ pub async fn create_project(
 
 /// Handles `GET /projects`.
 ///
-/// Only projects owned by the authenticated user are listed.
+/// Lists every project the user owns or belongs to, once per project.
 pub async fn list_projects(State(pool): State<PgPool>, auth: AuthUser) -> Response {
-    match list_projects_owned_by(&pool, auth.id).await {
+    match list_projects_for_user(&pool, auth.id).await {
         Ok(projects) => (StatusCode::OK, Json(ListProjectsResponse { projects })).into_response(),
         Err(error) => {
             log_database_error("GET /projects", &error);
@@ -343,7 +363,7 @@ pub async fn list_projects(State(pool): State<PgPool>, auth: AuthUser) -> Respon
     }
 }
 
-/// Handles `GET /projects/{project_id}`.
+/// Handles `GET /projects/{project_id}` for the owner or any member.
 pub async fn get_project(
     State(pool): State<PgPool>,
     auth: AuthUser,
@@ -354,7 +374,7 @@ pub async fn get_project(
         Err(response) => return response,
     };
 
-    match find_owned_project(&pool, project_id, auth.id).await {
+    match find_accessible_project(&pool, project_id, auth.id).await {
         Ok(Some(project)) => (StatusCode::OK, Json(project)).into_response(),
         Ok(None) => project_not_found(),
         Err(error) => {
@@ -364,7 +384,28 @@ pub async fn get_project(
     }
 }
 
-/// Handles `PATCH /projects/{project_id}`.
+/// Loads a project for an owner-only action.
+///
+/// A caller with no access gets the usual `404`; a member, who already knows
+/// the project exists, gets `403` instead of a misleading "not found".
+async fn require_owned_project(
+    pool: &PgPool,
+    endpoint: &str,
+    project_id: i64,
+    user_id: i64,
+) -> Result<Project, Response> {
+    match find_accessible_project(pool, project_id, user_id).await {
+        Ok(Some(project)) if project.owner_id == user_id => Ok(project),
+        Ok(Some(_)) => Err(forbidden("only the project owner can change this project")),
+        Ok(None) => Err(project_not_found()),
+        Err(error) => {
+            log_database_error(endpoint, &error);
+            Err(internal_error())
+        }
+    }
+}
+
+/// Handles `PATCH /projects/{project_id}`. Owner only.
 pub async fn update_project(
     State(pool): State<PgPool>,
     auth: AuthUser,
@@ -375,6 +416,12 @@ pub async fn update_project(
         Ok(project_id) => project_id,
         Err(response) => return response,
     };
+
+    if let Err(response) =
+        require_owned_project(&pool, "PATCH /projects/{project_id}", project_id, auth.id).await
+    {
+        return response;
+    }
 
     let Json(request) = match payload {
         Ok(payload) => payload,
@@ -400,7 +447,7 @@ pub async fn update_project(
     }
 }
 
-/// Handles `DELETE /projects/{project_id}`.
+/// Handles `DELETE /projects/{project_id}`. Owner only.
 pub async fn delete_project(
     State(pool): State<PgPool>,
     auth: AuthUser,
@@ -410,6 +457,12 @@ pub async fn delete_project(
         Ok(project_id) => project_id,
         Err(response) => return response,
     };
+
+    if let Err(response) =
+        require_owned_project(&pool, "DELETE /projects/{project_id}", project_id, auth.id).await
+    {
+        return response;
+    }
 
     match delete_owned_project(&pool, project_id, auth.id).await {
         Ok(true) => (

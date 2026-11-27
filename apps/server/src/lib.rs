@@ -3,11 +3,14 @@
 //! Process startup lives in `main.rs`; this module wires the HTTP API and
 //! exposes the modules that integration tests exercise against PostgreSQL.
 
-use axum::{Router, extract::State, http::StatusCode, routing::get, routing::post};
+use axum::{
+    Router, extract::State, http::StatusCode, routing::delete, routing::get, routing::post,
+};
 use sqlx::PgPool;
 
 pub mod auth;
 pub mod errors;
+pub mod members;
 pub mod password;
 pub mod projects;
 pub mod sessions;
@@ -31,6 +34,14 @@ pub fn app(pool: PgPool) -> Router {
             get(projects::get_project)
                 .patch(projects::update_project)
                 .delete(projects::delete_project),
+        )
+        .route(
+            "/projects/{project_id}/members",
+            get(members::list_members).post(members::add_member),
+        )
+        .route(
+            "/projects/{project_id}/members/{user_id}",
+            delete(members::remove_member),
         )
         .with_state(pool)
 }

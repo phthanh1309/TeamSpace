@@ -60,6 +60,42 @@ struct ListProjectsResponse {
     projects: Vec<Project>,
 }
 
+/// A project participant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberRole {
+    Owner,
+    Member,
+}
+
+impl MemberRole {
+    /// Label shown in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Owner => "Owner",
+            Self::Member => "Member",
+        }
+    }
+}
+
+/// A member of a project, as returned by the members endpoints.
+///
+/// The owner is part of this list with the `owner` role; it is derived from
+/// `projects.owner_id` on the server, not stored as a membership row.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Member {
+    pub user_id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub role: MemberRole,
+    pub joined_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMembersResponse {
+    members: Vec<Member>,
+}
+
 /// The error body every failing endpoint returns.
 #[derive(Debug, Default, Deserialize)]
 struct ErrorBody {
@@ -97,6 +133,7 @@ impl ApiError {
     pub fn user_message(&self) -> String {
         match self.status {
             Some(401) => "Your session has expired. Please sign in again.".to_owned(),
+            Some(403) => "Only the project owner can do that.".to_owned(),
             Some(404) => "That item no longer exists.".to_owned(),
             Some(status) if status >= 500 => {
                 "The server had a problem. Please try again.".to_owned()
@@ -124,6 +161,11 @@ struct LoginRequest<'a> {
 struct ProjectWrite<'a> {
     name: &'a str,
     description: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct AddMemberRequest<'a> {
+    email: &'a str,
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(
@@ -262,6 +304,42 @@ pub async fn delete_project(token: &str, project_id: i64) -> Result<(), ApiError
     read_empty(
         http()
             .delete(format!("{}/projects/{project_id}", api_base_url()))
+            .bearer_auth(token),
+    )
+    .await
+}
+
+/// Lists the participants of a project. The owner is included first.
+pub async fn list_members(token: &str, project_id: i64) -> Result<Vec<Member>, ApiError> {
+    let response: ListMembersResponse = read_json(
+        http()
+            .get(format!("{}/projects/{project_id}/members", api_base_url()))
+            .bearer_auth(token),
+    )
+    .await?;
+
+    Ok(response.members)
+}
+
+/// Adds an existing account to a project by email. Owner only.
+pub async fn add_member(token: &str, project_id: i64, email: &str) -> Result<Member, ApiError> {
+    read_json(
+        http()
+            .post(format!("{}/projects/{project_id}/members", api_base_url()))
+            .bearer_auth(token)
+            .json(&AddMemberRequest { email }),
+    )
+    .await
+}
+
+/// Removes a member from a project. Owner only.
+pub async fn remove_member(token: &str, project_id: i64, user_id: i64) -> Result<(), ApiError> {
+    read_empty(
+        http()
+            .delete(format!(
+                "{}/projects/{project_id}/members/{user_id}",
+                api_base_url()
+            ))
             .bearer_auth(token),
     )
     .await

@@ -640,15 +640,29 @@ async fn project_schema_enforces_its_invariants() {
         "the projects table must exist before the down migration"
     );
 
-    let up = up_migration_files()
-        .into_iter()
-        .find(|path| {
+    let migrations = up_migration_files();
+    let projects_index = migrations
+        .iter()
+        .position(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.contains("create_projects"))
         })
         .expect("the create_projects migration must exist");
-    apply_sql_file(&schema.pool, &down_migration_file(&up)).await;
+
+    // Roll back the migrations created after `create_projects` first, newest
+    // first: a migration can only be undone once nothing it created is still
+    // referenced. For example `project_members` has a foreign key to
+    // `projects`, so its down script must run before the projects one.
+    for path in migrations[projects_index + 1..].iter().rev() {
+        apply_sql_file(&schema.pool, &down_migration_file(path)).await;
+    }
+
+    apply_sql_file(
+        &schema.pool,
+        &down_migration_file(&migrations[projects_index]),
+    )
+    .await;
 
     let projects_table: Option<String> = sqlx::query_scalar("SELECT to_regclass('projects')::text")
         .fetch_one(&schema.pool)

@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 
 use crate::api::{self, ApiError, Project};
 use crate::components::{
-    Alert, AlertKind, Button, ButtonVariant, EmptyState, Spinner, TextAreaField, TextField,
+    Alert, AlertKind, Button, ButtonVariant, EmptyState, MembersPanel, Spinner, TextAreaField,
+    TextField,
 };
 use crate::format;
 use crate::routes::Route;
@@ -151,7 +152,12 @@ pub fn ProjectDetailPage(project_id: i64) -> Element {
         (None, None) => rsx! {
             Spinner { label: "Loading project…".to_string() }
         },
-        (Some(found), None) => rsx! {
+        (Some(found), None) => {
+            // Ownership drives which actions are shown. The backend enforces the
+            // same rule, so hiding them is only a convenience.
+            let is_owner = state.user().is_some_and(|user| user.id == found.owner_id);
+
+            rsx! {
             header { class: "detail-head",
                 div { class: "detail-head-text",
                     span { class: "eyebrow", "Project" }
@@ -159,20 +165,25 @@ pub fn ProjectDetailPage(project_id: i64) -> Element {
                     p { class: "detail-meta",
                         "Created {format::short_date(&found.created_at)} · Updated {format::short_date(&found.updated_at)}"
                     }
-                }
-                div { class: "detail-actions",
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        onclick: move |_| {
-                            notice.set(None);
-                            editing.set(!editing());
-                        },
-                        if editing() { "Cancel edit" } else { "Edit project" }
+                    p { class: "detail-role",
+                        if is_owner { "You own this project" } else { "You are a member of this project" }
                     }
-                    Button {
-                        variant: ButtonVariant::Danger,
-                        onclick: move |_| confirming_delete.set(true),
-                        "Delete"
+                }
+                if is_owner {
+                    div { class: "detail-actions",
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            onclick: move |_| {
+                                notice.set(None);
+                                editing.set(!editing());
+                            },
+                            if editing() { "Cancel edit" } else { "Edit project" }
+                        }
+                        Button {
+                            variant: ButtonVariant::Danger,
+                            onclick: move |_| confirming_delete.set(true),
+                            "Delete"
+                        }
                     }
                 }
             }
@@ -192,7 +203,9 @@ pub fn ProjectDetailPage(project_id: i64) -> Element {
                 }
             }
 
-            if editing() {
+            MembersPanel { project_id: found.id, is_owner }
+
+            if editing() && is_owner {
                 section { class: "detail-card",
                     h2 { class: "section-title", "Edit project" }
                     if let Some(message) = form_error() {
@@ -225,7 +238,7 @@ pub fn ProjectDetailPage(project_id: i64) -> Element {
                 }
             }
 
-            if confirming_delete() {
+            if confirming_delete() && is_owner {
                 section { class: "confirm-box",
                     h2 { class: "section-title", "Delete this project?" }
                     p { class: "section-hint",
@@ -249,7 +262,8 @@ pub fn ProjectDetailPage(project_id: i64) -> Element {
                     }
                 }
             }
-        },
+            }
+        }
     };
 
     rsx! {
